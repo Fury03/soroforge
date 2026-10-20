@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/soroworks/soroforge/internal/api"
@@ -410,8 +412,38 @@ Pass --network to restrict the list to one network.`,
 	}
 }
 
+func parseSince(raw string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	for _, layout := range []string{
+		"2006-01-02",
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, nil
+		}
+	}
+	if strings.HasSuffix(raw, "d") {
+		daysStr := strings.TrimSuffix(raw, "d")
+		days, err := strconv.Atoi(daysStr)
+		if err == nil && days > 0 {
+			return time.Now().Add(-time.Duration(days) * 24 * time.Hour), nil
+		}
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return time.Now().Add(-d), nil
+	}
+	return time.Time{}, fmt.Errorf("invalid --since value %q: expected date (e.g. 2026-09-01) or duration (e.g. 30d, 24h)", raw)
+}
+
 func newHistoryCmd() *cobra.Command {
-	var failures bool
+	var (
+		failures bool
+		limit    int
+		sinceRaw string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "history <alias>",
@@ -432,6 +464,14 @@ The subcommands move the whole history between databases:
   history import  load such a document into an empty (or, with --merge, existing) database`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if limit < 0 {
+				return fmt.Errorf("invalid --limit value %d: must be positive", limit)
+			}
+			sinceTime, err := parseSince(sinceRaw)
+			if err != nil {
+				return err
+			}
+
 			a, err := newApp(cmd.Context(), appOptions{})
 			if err != nil {
 				return err
@@ -449,19 +489,54 @@ The subcommands move the whole history between databases:
 				if err != nil {
 					return err
 				}
+				if !sinceTime.IsZero() {
+					filtered := attempts[:0]
+					for _, att := range attempts {
+						if att.CreatedAt.After(sinceTime) {
+							filtered = append(filtered, att)
+						}
+					}
+					attempts = filtered
+				}
+				if limit > 0 && len(attempts) > limit {
+					attempts = attempts[:limit]
+				}
 				return printFailures(alias, network, attempts)
 			}
 
-			deployments, err := a.service.History(cmd.Context(), network, alias)
+			var deployments []store.Deployment
+			if limit > 0 && sinceTime.IsZero() {
+				deployments, err = a.service.HistoryPage(cmd.Context(), network, alias, limit, 0)
+			} else {
+				deployments, err = a.service.History(cmd.Context(), network, alias)
+			}
 			if err != nil {
 				return err
 			}
+
+			if !sinceTime.IsZero() {
+				filtered := deployments[:0]
+				for _, d := range deployments {
+					if d.CreatedAt.After(sinceTime) {
+						filtered = append(filtered, d)
+					}
+				}
+				deployments = filtered
+			}
+			if limit > 0 && len(deployments) > limit {
+				deployments = deployments[:limit]
+			}
+
 			return printHistory(alias, network, deployments)
 		},
 	}
 
 	cmd.Flags().BoolVar(&failures, "failures", false,
 		"show failed deploy and upgrade attempts instead of confirmed history")
+	cmd.Flags().IntVar(&limit, "limit", 0,
+		"print the N newest records")
+	cmd.Flags().StringVar(&sinceRaw, "since", "",
+		"print records after a date (YYYY-MM-DD) or duration (e.g. 30d, 24h)")
 	attachAliasCompletion(cmd)
 	cmd.AddCommand(newHistoryExportCmd(), newHistoryImportCmd())
 	return cmd
@@ -692,21 +767,31 @@ The non-zero exit on drift makes this usable as a CI gate.`,
 	return cmd
 }
 
-func newVerifyCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "verify <alias>",
-		Short: "Check whether the local build is the one that is live",
-		Long: `Hash the alias's local WASM (the wasm path in soroforge.yaml) and compare it
-with the bytecode the tracked contract runs on-chain.
+func newDiffCmd() *cobra.Command {
+	var (
+		from           string
+		to             string
+		failOnBreaking bool
+	)
 
-Use it before a release, to confirm a rebuild is reproducible or that a hotfix
-actually differs from production. Like status, it needs no signing key.
+	cmd := &cobra.Command{
+		Use:   "diff <alias>",
+		Short: "Show the interface change between recorded versions",
+		Long: `Show what an upgrade changed in a contract's interface: functions, types and
+events added, removed, or changed between two recorded WASM versions.
+
+The interfaces are read from the network's sorovault_url, where SoroVault keeps
+the decoded interface of every version it has registered. By default the last
+two recorded versions are compared; --from and --to pick any pair.
+
+Removed or changed functions and types are marked breaking. With
+--fail-on-breaking the command exits non-zero when there are any, so it can
+gate an upgrade in CI.
 
 Exit codes:
-  0  match: the local build is live
-  1  the check could not be completed (including a missing local artifact)
-  2  differs: the contract runs different bytecode
-  3  the contract is not tracked on the network, or not on-chain`,
+  0  compared (with --fail-on-breaking: no breaking changes)
+  1  the comparison could not be made
+  2  breaking changes found (only with --fail-on-breaking)`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := newApp(cmd.Context(), appOptions{})
@@ -715,30 +800,31 @@ Exit codes:
 			}
 			defer a.Close()
 
-			result, err := a.service.Verify(cmd.Context(), deploy.VerifyRequest{
+			result, err := a.service.Diff(cmd.Context(), deploy.DiffRequest{
 				Alias:   args[0],
 				Network: flags.network,
+				From:    from,
+				To:      to,
 			})
 			if err != nil {
 				return err
 			}
-			if err := printVerify(result); err != nil {
+			if err := printDiff(result); err != nil {
 				return err
 			}
 
-			// Printed already; these only select the exit code.
-			switch result.Outcome {
-			case deploy.VerifyDiffers:
+			if failOnBreaking && result.Breaking {
+				// Printed already; this only selects the exit code.
 				cmd.SilenceErrors = true
-				return &driftError{detail: result.Detail}
-			case deploy.VerifyUnavailable:
-				cmd.SilenceErrors = true
-				return &unavailableError{detail: result.Detail}
+				return &driftError{detail: fmt.Sprintf("%s has breaking interface changes", result.Alias)}
 			}
 			return nil
 		},
 	}
 
+	cmd.Flags().StringVar(&from, "from", "", "WASM hash of the older version (default: the version before --to)")
+	cmd.Flags().StringVar(&to, "to", "", "WASM hash of the newer version (default: the current version)")
+	cmd.Flags().BoolVar(&failOnBreaking, "fail-on-breaking", false, "exit 2 when any change is breaking")
 	attachAliasCompletion(cmd)
 	return cmd
 }
