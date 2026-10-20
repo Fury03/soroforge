@@ -692,6 +692,57 @@ The non-zero exit on drift makes this usable as a CI gate.`,
 	return cmd
 }
 
+func newVerifyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "verify <alias>",
+		Short: "Check whether the local build is the one that is live",
+		Long: `Hash the alias's local WASM (the wasm path in soroforge.yaml) and compare it
+with the bytecode the tracked contract runs on-chain.
+
+Use it before a release, to confirm a rebuild is reproducible or that a hotfix
+actually differs from production. Like status, it needs no signing key.
+
+Exit codes:
+  0  match: the local build is live
+  1  the check could not be completed (including a missing local artifact)
+  2  differs: the contract runs different bytecode
+  3  the contract is not tracked on the network, or not on-chain`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := newApp(cmd.Context(), appOptions{})
+			if err != nil {
+				return err
+			}
+			defer a.Close()
+
+			result, err := a.service.Verify(cmd.Context(), deploy.VerifyRequest{
+				Alias:   args[0],
+				Network: flags.network,
+			})
+			if err != nil {
+				return err
+			}
+			if err := printVerify(result); err != nil {
+				return err
+			}
+
+			// Printed already; these only select the exit code.
+			switch result.Outcome {
+			case deploy.VerifyDiffers:
+				cmd.SilenceErrors = true
+				return &driftError{detail: result.Detail}
+			case deploy.VerifyUnavailable:
+				cmd.SilenceErrors = true
+				return &unavailableError{detail: result.Detail}
+			}
+			return nil
+		},
+	}
+
+	attachAliasCompletion(cmd)
+	return cmd
+}
+
 func newServeCmd() *cobra.Command {
 	var (
 		addr    string

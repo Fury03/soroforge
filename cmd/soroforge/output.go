@@ -588,6 +588,28 @@ func printStatus(r *deploy.StatusResult) error {
 	return nil
 }
 
+func printVerify(r *deploy.VerifyResult) error {
+	if flags.jsonOutput {
+		return printJSON(r)
+	}
+
+	w := out()
+	fmt.Fprintf(w, "%s\n\n", r.Detail)
+
+	fmt.Fprintf(w, "  Alias         %s\n", r.Alias)
+	fmt.Fprintf(w, "  Network       %s\n", r.Network)
+	if r.ContractID != "" {
+		fmt.Fprintf(w, "  Contract ID   %s\n", r.ContractID)
+	}
+	fmt.Fprintf(w, "  Outcome       %s\n", r.Outcome)
+	fmt.Fprintf(w, "  Local         %s  (%s)\n", r.LocalWasmHash, r.WasmPath)
+	if r.LiveWasmHash != "" {
+		fmt.Fprintf(w, "  On-chain      %s\n", r.LiveWasmHash)
+	}
+
+	return nil
+}
+
 func printNetworkStatus(r *deploy.NetworkStatus) error {
 	if flags.jsonOutput {
 		return printJSON(r)
