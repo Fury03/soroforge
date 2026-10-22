@@ -556,8 +556,11 @@ of an error printed mid-prompt.
 
 `deploy`, `upgrade`, and `upload` accept `--dry-run` and `--notes`. `deploy`
 and `upgrade` also accept `--yes`, which skips the typed confirmation required
-on networks marked `protected: true`. They also accept `--progress`,
-`--require-spec`, and `--git-commit`, which
+on networks marked `protected: true`, and `--confirm-timeout <duration>` (for
+example `5m`), which extends how long SoroForge waits for a submitted
+transaction to reach a terminal state beyond the two-minute default. Zero and
+negative values are rejected before anything is submitted. They also accept
+`--progress`, `--require-spec`, and `--git-commit`, which
 records a source revision supplied by CI instead of detecting the current
 checkout. History displays confirmed transaction fees in stroops and XLM, plus
 the short source commit (`*` marks a dirty working tree).
