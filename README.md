@@ -294,6 +294,26 @@ inferred from the name — it's mixed into every signature, so a wrong value
 produces a transaction that's invalid on the network you meant to use, and a
 silently defaulted one could sign a mainnet deploy with testnet assumptions.
 
+**Environment references in URLs.** Most mainnet RPC providers put an API key
+in the URL. Keep it out of the committed file by referencing an environment
+variable as `${NAME}` in `rpc_url` or `sorovault_url`:
+
+```yaml
+networks:
+  mainnet:
+    rpc_url: https://provider.example/v1/${MAINNET_RPC_KEY}
+```
+
+- Only the braced `${NAME}` form is expanded; a bare `$NAME` or any other `$`
+  is left as written.
+- A referenced variable that is unset or empty is a load error naming the
+  variable and the key — never a silently empty URL.
+- Only `rpc_url` and `sorovault_url` are expanded. The passphrase, contract
+  fields and constructor arguments are not: the passphrase must be reviewable
+  as written, and contract settings are recorded in the deployment history.
+- The expanded value is never printed. Error messages, `config show` and its
+  `--json` output show the `${NAME}` form, so the key cannot leak into CI logs.
+
 To see what SoroForge actually resolved — file, environment and flags merged —
 run `soroforge config show`. It needs neither Postgres nor a signing key, prints
 contract WASM paths resolved to absolute paths, and reports secrets only as
@@ -629,7 +649,20 @@ without a `sorovault_url` is an error naming it.
 | `1` | The check could not be completed. |
 | `2` | Drift, untracked, or missing on-chain. |
 
-The four states it reports:
+**`verify`** answers the question `status` cannot: is the WASM I just built
+the one that is live? It hashes the alias's local artifact and compares it with
+the tracked contract's on-chain bytecode — to confirm a rebuild is
+reproducible, or that a hotfix branch really differs from production. It needs
+no signing key, and `--json` includes both hashes.
+
+| Code | Meaning |
+|---|---|
+| `0` | Match: the local build is live. |
+| `1` | The check could not be completed, including a missing local artifact. |
+| `2` | Differs: the contract runs different bytecode. |
+| `3` | The contract is not tracked on the network, or not on-chain. |
+
+The four `status` states:
 
 - **`in_sync`** — the chain matches the record.
 - **`drift`** — the contract is running bytecode SoroForge didn't deploy.
@@ -681,6 +714,50 @@ deployment in the database, including aliases that have since left
 soroforge history export --out history.json   # or pipe stdout
 soroforge history import history.json         # empty database
 soroforge history import history.json --merge # existing records kept, duplicates skipped
+```
+
+### GitHub Action
+
+The repository is a composite action that installs a release binary — verified
+against the release's `checksums.txt` — and runs one soroforge command, so a
+workflow needs a single `uses:` line. The command's exit code is the step's,
+so `status --all` fails the job on drift.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `version` | `latest` | Release to install, e.g. `v0.2.0`. `latest` is resolved through the GitHub API with the workflow token. |
+| `args` | — | The soroforge command line, e.g. `status --all`. |
+| `working-directory` | `.` | Where to run it, i.e. the directory holding `soroforge.yaml`. |
+
+Secrets are never inputs — inputs appear in the action's own step logs. Pass
+`SOROFORGE_SECRET_KEY` and `DATABASE_URL` as `env:` instead. Linux and macOS
+runners (amd64 and arm64) are supported; Windows is not.
+
+```yaml
+name: contracts
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds, simulates and prints the plan without signing or submitting.
+      - uses: soroworks/soroforge@main
+        if: github.event_name == 'pull_request'
+        with:
+          version: v0.2.0
+          args: deploy --all --dry-run
+      # Exits non-zero when any tracked contract has drifted.
+      - uses: soroworks/soroforge@main
+        with:
+          version: v0.2.0
+          args: status --all
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
 ```
 
 ---
