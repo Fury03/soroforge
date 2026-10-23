@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,6 +75,11 @@ func TestResolvePathReportsAnUnusableWorkingDirectory(t *testing.T) {
 	// filepath.Abs needs a working directory. A container that started in a
 	// directory which has since been removed is the realistic way to hit this,
 	// and the failure should name the path it could not resolve.
+	if runtime.GOOS == "windows" {
+		// Windows refuses to delete a directory that is some process's
+		// working directory, so this state cannot be produced there.
+		t.Skip("Windows cannot remove the current working directory")
+	}
 	dir := t.TempDir()
 	t.Chdir(dir)
 	require.NoError(t, os.RemoveAll(dir))
